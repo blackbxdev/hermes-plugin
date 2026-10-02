@@ -205,25 +205,124 @@ def test_interim_passthrough_when_disabled(tmp_path, monkeypatch):
     assert api.sent and api.sent[-1]["body"] == "work note"
 
 
-def test_ack_on_replyable_mail_only(tmp_path, monkeypatch):
+def test_ack_fires_only_for_replyable_mail(tmp_path, monkeypatch):
     api = FakeApi(inboxes=[{"id": "inb_1", "address": "bot@omail.sh"}],
                   messages={"thr_1": [api_message()],
                             "thr_2": [api_message(id="msg_2", threadId="thr_2", category="automated",
                                                   autoReplyable=False)]})
-    adapter = make_adapter(api, tmp_path, monkeypatch=monkeypatch)
+    adapter = make_adapter(api, tmp_path, monkeypatch=monkeypatch, OPENMAIL_ACK_DELAY="0.05")
     adapter._resolve_scope()
-    _dispatch(adapter, event())
-    assert len(api.sent) == 1 and api.sent[0]["body"] == adapter.settings.ack_text
+
+    async def _handler(ev):
+        pass
+    adapter.handle_message = _handler
+
+    async def flow():
+        await adapter._on_event(event())
+        await asyncio.sleep(0.2)  # past the delay, no reply yet: the ack fires
+        await adapter._on_event(event(event_id="evt_2", thread_id="thr_2",
+                                       message={"id": "msg_2", "from": "ada@x.io"}))
+        await asyncio.sleep(0.2)  # automated mail: never acked
+
+    run(flow())
+    assert len(api.sent) == 1
+    assert api.sent[0]["body"] == "On it. Full reply shortly."
     assert api.sent[0]["thread_id"] == "thr_1" and api.sent[0]["include_quote"] is False
-    _dispatch(adapter, event(event_id="evt_2", thread_id="thr_2", message={"id": "msg_2", "from": "ada@x.io"}))
-    assert len(api.sent) == 1  # notify-mode mail: no ack, no reply turn
+
+
+def test_fast_reply_answers_once_no_ack(tmp_path, monkeypatch):
+    api = FakeApi(inboxes=[{"id": "inb_1", "address": "bot@omail.sh"}], messages={"thr_1": [api_message()]})
+    adapter = make_adapter(api, tmp_path, monkeypatch=monkeypatch, OPENMAIL_ACK_DELAY="0.05")
+    adapter._resolve_scope()
+
+    async def _handler(ev):
+        pass
+    adapter.handle_message = _handler
+
+    async def flow():
+        await adapter._on_event(event())
+        result = await adapter.send("ada@x.io", "Hi right back!")  # reply beats the delay
+        assert result.success
+        await asyncio.sleep(0.2)  # the fuse is cut: no ack after the answer
+
+    run(flow())
+    assert [s["body"] for s in api.sent] == ["Hi right back!"]
+
+
+def test_slow_turn_ack_is_dynamic(tmp_path, monkeypatch):
+    api = FakeApi(inboxes=[{"id": "inb_1", "address": "bot@omail.sh"}], messages={"thr_1": [api_message()]})
+    adapter = make_adapter(api, tmp_path, monkeypatch=monkeypatch, OPENMAIL_ACK_DELAY="0.05")
+    adapter._resolve_scope()
+
+    async def _handler(ev):
+        pass
+    adapter.handle_message = _handler
+
+    async def flow():
+        await adapter._on_event(event())
+        assert (await adapter.send("ada@x.io", "Sweeping Kijiji for a 2020 Can-Am Outlander 850",
+                                   metadata={"_interim_send": True})).success
+        await asyncio.sleep(0.2)  # delay elapses with no final: ack quotes the live status
+
+    run(flow())
+    assert [s["body"] for s in api.sent] == ["On it - Sweeping Kijiji for a 2020 Can-Am Outlander 850"]
+
+
+def test_pending_ack_covers_followup_mail(tmp_path, monkeypatch):
+    api = FakeApi(inboxes=[{"id": "inb_1", "address": "bot@omail.sh"}],
+                  messages={"thr_1": [api_message(), api_message(id="msg_2")]})
+    adapter = make_adapter(api, tmp_path, monkeypatch=monkeypatch, OPENMAIL_ACK_DELAY="0.05")
+    adapter._resolve_scope()
+
+    async def _handler(ev):
+        pass
+    adapter.handle_message = _handler
+
+    async def flow():
+        await adapter._on_event(event())
+        await asyncio.sleep(0.02)  # still inside the first fuse: the follow-up is covered by it
+        await adapter._on_event(event(event_id="evt_2", message={"id": "msg_2", "from": "Ada <ada@x.io>"}))
+        await asyncio.sleep(0.2)
+
+    run(flow())
+    assert len(api.sent) == 1  # one ack covers both mails; no double-acking
+
+
+def test_new_mail_after_answer_is_acked_again(tmp_path, monkeypatch):
+    api = FakeApi(inboxes=[{"id": "inb_1", "address": "bot@omail.sh"}],
+                  messages={"thr_1": [api_message(), api_message(id="msg_2")]})
+    adapter = make_adapter(api, tmp_path, monkeypatch=monkeypatch, OPENMAIL_ACK_DELAY="0.05")
+    adapter._resolve_scope()
+
+    async def _handler(ev):
+        pass
+    adapter.handle_message = _handler
+
+    async def flow():
+        await adapter._on_event(event())
+        await adapter.send("ada@x.io", "First answer.")
+        await adapter._on_event(event(event_id="evt_2", message={"id": "msg_2", "from": "Ada <ada@x.io>"}))
+        await asyncio.sleep(0.2)
+
+    run(flow())
+    assert [s["body"] for s in api.sent] == ["First answer.", "On it. Full reply shortly."]
 
 
 def test_ack_disabled(tmp_path, monkeypatch):
     api = FakeApi(inboxes=[{"id": "inb_1", "address": "bot@omail.sh"}], messages={"thr_1": [api_message()]})
-    adapter = make_adapter(api, tmp_path, monkeypatch=monkeypatch, OPENMAIL_ACK="false")
+    adapter = make_adapter(api, tmp_path, monkeypatch=monkeypatch, OPENMAIL_ACK="false",
+                           OPENMAIL_ACK_DELAY="0.05")
     adapter._resolve_scope()
-    _dispatch(adapter, event())
+
+    async def _handler(ev):
+        pass
+    adapter.handle_message = _handler
+
+    async def flow():
+        await adapter._on_event(event())
+        await asyncio.sleep(0.2)  # past the delay: still nothing, ack is off
+
+    run(flow())
     assert api.sent == []
 
 

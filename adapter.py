@@ -30,6 +30,23 @@ _IMAGE_EXT = {"image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif", "i
 # server from streaming unbounded bytes into memory.
 _DOWNLOAD_CEILING = 25 * 1024 * 1024
 _FIND_RETRIES = (0.5, 1.5, 3.0)  # the API row can lag the websocket frame by a moment
+_ACK_STATE_CAP = 500  # bound the per-thread ack bookkeeping
+
+
+def _first_line(text: str, cap: int = 140) -> str:
+    """The status line the delayed ack quotes: first non-empty line, capped."""
+    line = next((ln.strip() for ln in (text or "").splitlines() if ln.strip()), "")
+    return line if len(line) <= cap else line[: cap - 1].rstrip() + "…"
+
+
+@dataclass
+class AckState:
+    """Per-thread ack bookkeeping: when mail arrived, and whether an ack or the reply went out since."""
+    inbound_at: float = 0.0
+    acked_at: float = 0.0
+    final_at: float = 0.0
+    interim: str = ""
+    touched: float = 0.0
 
 
 def state_dir() -> Path:
@@ -117,6 +134,8 @@ class OpenMailAdapter(BasePlatformAdapter):
         self._stop = asyncio.Event()
         self._warned_default_deny = False
         self.threads = threads or ThreadStore(state_dir() / "threads.json")
+        self._acks: Dict[str, AckState] = {}
+        self._ack_tasks: Dict[str, asyncio.Task] = {}
 
     # ---- lifecycle ---------------------------------------------------------------------------
     async def connect(self, *, is_reconnect: bool = False) -> bool:
@@ -317,17 +336,59 @@ class OpenMailAdapter(BasePlatformAdapter):
         )
         logger.info("[OpenMail] mail from %s: %s", sender, subject or "(no subject)")
         if effective_mode == "channel" and self.settings.ack:
-            await self._send_ack(inbox_id=inbox_id, to=sender, thread_id=thread_id)
+            self._schedule_ack(inbox_id=inbox_id, to=sender, thread_id=thread_id)
         await self.handle_message(event)
 
+    def _ack_state(self, thread_id: str) -> AckState:
+        st = self._acks.get(thread_id)
+        if st is None:
+            st = self._acks[thread_id] = AckState()
+            if len(self._acks) > _ACK_STATE_CAP:
+                for key in sorted(self._acks, key=lambda k: self._acks[k].touched)[:-_ACK_STATE_CAP]:
+                    self._acks.pop(key, None)
+                    self._ack_tasks.pop(key, None)
+        st.touched = time.time()
+        return st
+
+    def _schedule_ack(self, *, inbox_id: str, to: str, thread_id: str) -> None:
+        """Delayed ack, deterministic: fires only if the reply has not gone out within
+        ``ack_delay`` seconds. A fast turn answers once; a slow one gets the ack first,
+        and the moment the answer goes out the pending ack is cancelled."""
+        st = self._ack_state(thread_id)
+        st.inbound_at = max(st.inbound_at, time.time())
+        pending = self._ack_tasks.get(thread_id)
+        if pending and not pending.done():
+            return  # an earlier mail in this thread already has a pending ack; it covers this one
+
+        async def _fire() -> None:
+            await asyncio.sleep(self.settings.ack_delay)
+            await self._send_ack(inbox_id=inbox_id, to=to, thread_id=thread_id)
+
+        self._ack_tasks[thread_id] = asyncio.create_task(_fire())
+
     async def _send_ack(self, *, inbox_id: str, to: str, thread_id: str) -> None:
-        """One-line ack so the sender knows the mail landed; the full answer follows when the turn finishes."""
+        """Ack only while a reply is still owed: never after the answer, never twice."""
         try:
+            st = self._ack_state(thread_id)
+            if st.final_at >= st.inbound_at or st.acked_at >= st.inbound_at:
+                return
+            body = f"On it - {st.interim}" if st.interim else self.settings.ack_text
             await asyncio.to_thread(self.api.send, inbox_id=inbox_id, to=to,
-                                    body=self.settings.ack_text, thread_id=thread_id,
-                                    include_quote=False)
+                                    body=body, thread_id=thread_id, include_quote=False)
+            st.acked_at = time.time()
         except Exception as exc:  # noqa: BLE001 — the ack is a courtesy; never block the turn on it
             logger.warning("[OpenMail] ack to %s failed: %s", to, exc)
+        finally:
+            self._ack_tasks.pop(thread_id, None)
+
+    def _note_final(self, thread_id: str) -> None:
+        """The reply went out: no ack is owed for this thread anymore."""
+        st = self._ack_state(thread_id)
+        st.final_at = time.time()
+        st.interim = ""
+        task = self._ack_tasks.get(thread_id)
+        if task and not task.done():
+            task.cancel()
 
     async def _stage_attachments(self, message_id: str, attachments: List[Mapping[str, Any]]) -> StagedMedia:
         staged = StagedMedia()
@@ -393,12 +454,14 @@ class OpenMailAdapter(BasePlatformAdapter):
         text = (content or "").strip()
         if not text and not attachments:
             return SendResult(success=True)
-        if self.settings.suppress_interim and (metadata or {}).get("_interim_send"):
+        ctx = self._context_for(chat_id, metadata)
+        if (metadata or {}).get("_interim_send") and self.settings.suppress_interim:
             # Email has no edit-in-place: every interim turn or progress bubble would become its
             # own mail. The gateway's streaming contract marks non-final sends, so the mailbox
-            # only ever gets the turn-final.
+            # only ever gets the turn-final; the latest status line feeds the delayed ack.
+            if ctx:
+                self._ack_state(ctx.thread_id).interim = _first_line(text)
             return SendResult(success=True)
-        ctx = self._context_for(chat_id, metadata)
         if ctx and ctx.mode == "notify":
             ok = await self._deliver_notice(text)
             return SendResult(success=ok, error=None if ok else "no home channel accepted the notification")
@@ -408,6 +471,7 @@ class OpenMailAdapter(BasePlatformAdapter):
                     inbox_id=ctx.inbox_id, to=ctx.to, body=text, thread_id=ctx.thread_id,
                     include_quote=None if self.settings.quote_replies else False,
                     attachments=attachments))
+                self._note_final(ctx.thread_id)
             else:
                 # No conversation on record: chat_id is a bare address (cron delivery, send_message tool).
                 inbox_id = await asyncio.to_thread(self._default_inbox)

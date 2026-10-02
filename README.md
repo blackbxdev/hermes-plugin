@@ -66,11 +66,14 @@ Channel mode answers only mail a person could have sent. OpenMail classifies eac
 
 ## Reply behaviour
 
-Email is correspondence, not a live transcript. In channel mode the sender gets exactly two mails per message: an instant one-line ack, then the finished answer when the turn completes. Everything in between — the agent's working narration, `⏳ Working` progress bubbles — is swallowed: the gateway's streaming contract marks interim sends, and email has no edit-in-place, so each would otherwise become its own mail.
+Email is correspondence, not a live transcript. Channel mode sends exactly one mail per inbound - the finished answer - plus, only when the answer takes longer than `OPENMAIL_ACK_DELAY` seconds (default 45), a one-line ack first. The rule is deterministic: a fast reply produces no ack at all (the answer is its own acknowledgment), a slow one confirms the mail landed while the agent works, and the pending ack is cancelled the moment the answer goes out. While the agent works, its latest status line folds into the ack body ("On it - Sweeping Kijiji..."), falling back to `OPENMAIL_ACK_TEXT` when no status exists yet.
 
-- `OPENMAIL_ACK` (default `true`): send the instant ack. `false` silences it.
-- `OPENMAIL_ACK_TEXT` (default `On it. Full reply shortly.`): the ack body.
-- `OPENMAIL_SUPPRESS_INTERIM` (default `true`): interim sends never become mail. Set `false` to restore the old behaviour (every intermediate turn mailed separately; noisy).
+Interim sends - the agent's working narration, `⏳ Working` progress bubbles - never become mail: the gateway's streaming contract marks them, and email has no edit-in-place.
+
+- `OPENMAIL_ACK` (default `true`): the delayed ack. `false` disables it entirely.
+- `OPENMAIL_ACK_DELAY` (default `45`): seconds the reply may take before an ack is sent. `0` acks immediately.
+- `OPENMAIL_ACK_TEXT` (default `On it. Full reply shortly.`): the ack body when no status line is available.
+- `OPENMAIL_SUPPRESS_INTERIM` (default `true`): interim sends never become mail. `false` restores the old behaviour (every intermediate turn mailed separately; noisy).
 - `OPENMAIL_QUOTE_REPLIES` (default `false`): replies quote the previous message. Off by default so the agent never nests its own words back at the sender.
 
 Per-inbox override, pod scope only, in `~/.hermes/config.yaml`:

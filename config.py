@@ -26,6 +26,13 @@ def truthy(value: Any) -> bool:
     return str(value or "").strip().lower() in _TRUTHY
 
 
+def number(value: Any, default: float) -> float:
+    try:
+        return max(0.0, float(str(value or "").strip()))
+    except (TypeError, ValueError):
+        return default
+
+
 def normalize_mode(value: Any, default: str = "channel") -> str:
     raw = str(value or "").strip().lower()
     return raw if raw in MODES else default
@@ -46,6 +53,9 @@ class OpenMailConfig:
     suppress_interim: bool = True
     ack: bool = True
     ack_text: str = "On it. Full reply shortly."
+    # Seconds the reply may take before an ack confirms the mail landed. Fast replies are
+    # never acked; slow ones get the ack first, cancelled the moment the answer goes out.
+    ack_delay: float = 45.0
     # Quoting your own previous replies compounds noise; quote only when asked to.
     quote_replies: bool = False
 
@@ -87,6 +97,7 @@ def read_config(extra: Optional[Mapping[str, Any]] = None) -> OpenMailConfig:
         suppress_interim=truthy(pick("OPENMAIL_SUPPRESS_INTERIM", "suppress_interim", "true")),
         ack=truthy(pick("OPENMAIL_ACK", "ack", "true")),
         ack_text=pick("OPENMAIL_ACK_TEXT", "ack_text", "On it. Full reply shortly."),
+        ack_delay=number(pick("OPENMAIL_ACK_DELAY", "ack_delay", "45"), 45.0),
         quote_replies=truthy(pick("OPENMAIL_QUOTE_REPLIES", "quote_replies", "false")),
     )
 
