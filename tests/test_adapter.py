@@ -181,3 +181,66 @@ def test_send_to_bare_address_starts_new_thread(tmp_path, monkeypatch):
     adapter._resolve_scope()
     result = run(adapter.send("someone@else.com", "Daily report"))
     assert result.success and api.sent[-1]["subject"] and api.sent[-1].get("thread_id") is None
+
+
+def test_interim_sends_never_reach_the_mailbox(tmp_path, monkeypatch):
+    api = FakeApi(inboxes=[{"id": "inb_1", "address": "bot@omail.sh"}], messages={"thr_1": [api_message()]})
+    adapter = make_adapter(api, tmp_path, monkeypatch=monkeypatch, OPENMAIL_ACK="false")
+    adapter._resolve_scope()
+    _dispatch(adapter, event())
+    assert run(adapter.send("ada@x.io", "Spec locked: searching now", metadata={"_interim_send": True})).success
+    assert run(adapter.send("ada@x.io", "⏳ Working — 3 min, iteration 6/500", metadata={"_interim_send": True})).success
+    assert api.sent == []  # neither narration nor progress bubbles became mail
+    assert run(adapter.send("ada@x.io", "The real answer.")).success
+    assert [s["body"] for s in api.sent] == ["The real answer."]
+
+
+def test_interim_passthrough_when_disabled(tmp_path, monkeypatch):
+    api = FakeApi(inboxes=[{"id": "inb_1", "address": "bot@omail.sh"}], messages={"thr_1": [api_message()]})
+    adapter = make_adapter(api, tmp_path, monkeypatch=monkeypatch, OPENMAIL_ACK="false",
+                           OPENMAIL_SUPPRESS_INTERIM="false")
+    adapter._resolve_scope()
+    _dispatch(adapter, event())
+    assert run(adapter.send("ada@x.io", "work note", metadata={"_interim_send": True})).success
+    assert api.sent and api.sent[-1]["body"] == "work note"
+
+
+def test_ack_on_replyable_mail_only(tmp_path, monkeypatch):
+    api = FakeApi(inboxes=[{"id": "inb_1", "address": "bot@omail.sh"}],
+                  messages={"thr_1": [api_message()],
+                            "thr_2": [api_message(id="msg_2", threadId="thr_2", category="automated",
+                                                  autoReplyable=False)]})
+    adapter = make_adapter(api, tmp_path, monkeypatch=monkeypatch)
+    adapter._resolve_scope()
+    _dispatch(adapter, event())
+    assert len(api.sent) == 1 and api.sent[0]["body"] == adapter.settings.ack_text
+    assert api.sent[0]["thread_id"] == "thr_1" and api.sent[0]["include_quote"] is False
+    _dispatch(adapter, event(event_id="evt_2", thread_id="thr_2", message={"id": "msg_2", "from": "ada@x.io"}))
+    assert len(api.sent) == 1  # notify-mode mail: no ack, no reply turn
+
+
+def test_ack_disabled(tmp_path, monkeypatch):
+    api = FakeApi(inboxes=[{"id": "inb_1", "address": "bot@omail.sh"}], messages={"thr_1": [api_message()]})
+    adapter = make_adapter(api, tmp_path, monkeypatch=monkeypatch, OPENMAIL_ACK="false")
+    adapter._resolve_scope()
+    _dispatch(adapter, event())
+    assert api.sent == []
+
+
+def test_channel_replies_not_quoted_by_default(tmp_path, monkeypatch):
+    api = FakeApi(inboxes=[{"id": "inb_1", "address": "bot@omail.sh"}], messages={"thr_1": [api_message()]})
+    adapter = make_adapter(api, tmp_path, monkeypatch=monkeypatch, OPENMAIL_ACK="false")
+    adapter._resolve_scope()
+    _dispatch(adapter, event())
+    run(adapter.send("ada@x.io", "The answer."))
+    assert api.sent[-1]["include_quote"] is False
+
+
+def test_quote_replies_opt_in(tmp_path, monkeypatch):
+    api = FakeApi(inboxes=[{"id": "inb_1", "address": "bot@omail.sh"}], messages={"thr_1": [api_message()]})
+    adapter = make_adapter(api, tmp_path, monkeypatch=monkeypatch, OPENMAIL_ACK="false",
+                           OPENMAIL_QUOTE_REPLIES="true")
+    adapter._resolve_scope()
+    _dispatch(adapter, event())
+    run(adapter.send("ada@x.io", "The answer."))
+    assert api.sent[-1]["include_quote"] is None

@@ -41,6 +41,13 @@ class OpenMailConfig:
     home_address: Optional[str] = None
     # Pod scope only: inbox id or address -> {"mode": ...}
     inboxes: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    # Email is correspondence, not a live transcript: interim sends (agent narration, progress
+    # bubbles) never become mail; the sender gets one ack and then the turn-final answer.
+    suppress_interim: bool = True
+    ack: bool = True
+    ack_text: str = "On it. Full reply shortly."
+    # Quoting your own previous replies compounds noise; quote only when asked to.
+    quote_replies: bool = False
 
     @property
     def configured(self) -> bool:
@@ -77,6 +84,10 @@ def read_config(extra: Optional[Mapping[str, Any]] = None) -> OpenMailConfig:
         mode=normalize_mode(pick("OPENMAIL_MODE", "mode")),
         home_address=pick("OPENMAIL_HOME_ADDRESS", "home_address") or None,
         inboxes=inboxes,
+        suppress_interim=truthy(pick("OPENMAIL_SUPPRESS_INTERIM", "suppress_interim", "true")),
+        ack=truthy(pick("OPENMAIL_ACK", "ack", "true")),
+        ack_text=pick("OPENMAIL_ACK_TEXT", "ack_text", "On it. Full reply shortly."),
+        quote_replies=truthy(pick("OPENMAIL_QUOTE_REPLIES", "quote_replies", "false")),
     )
 
 

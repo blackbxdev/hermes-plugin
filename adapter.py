@@ -316,7 +316,18 @@ class OpenMailAdapter(BasePlatformAdapter):
                       "openmail_category": classification.category},
         )
         logger.info("[OpenMail] mail from %s: %s", sender, subject or "(no subject)")
+        if effective_mode == "channel" and self.settings.ack:
+            await self._send_ack(inbox_id=inbox_id, to=sender, thread_id=thread_id)
         await self.handle_message(event)
+
+    async def _send_ack(self, *, inbox_id: str, to: str, thread_id: str) -> None:
+        """One-line ack so the sender knows the mail landed; the full answer follows when the turn finishes."""
+        try:
+            await asyncio.to_thread(self.api.send, inbox_id=inbox_id, to=to,
+                                    body=self.settings.ack_text, thread_id=thread_id,
+                                    include_quote=False)
+        except Exception as exc:  # noqa: BLE001 — the ack is a courtesy; never block the turn on it
+            logger.warning("[OpenMail] ack to %s failed: %s", to, exc)
 
     async def _stage_attachments(self, message_id: str, attachments: List[Mapping[str, Any]]) -> StagedMedia:
         staged = StagedMedia()
@@ -382,6 +393,11 @@ class OpenMailAdapter(BasePlatformAdapter):
         text = (content or "").strip()
         if not text and not attachments:
             return SendResult(success=True)
+        if self.settings.suppress_interim and (metadata or {}).get("_interim_send"):
+            # Email has no edit-in-place: every interim turn or progress bubble would become its
+            # own mail. The gateway's streaming contract marks non-final sends, so the mailbox
+            # only ever gets the turn-final.
+            return SendResult(success=True)
         ctx = self._context_for(chat_id, metadata)
         if ctx and ctx.mode == "notify":
             ok = await self._deliver_notice(text)
@@ -390,6 +406,7 @@ class OpenMailAdapter(BasePlatformAdapter):
             if ctx:
                 result = await asyncio.to_thread(lambda: self.api.send(
                     inbox_id=ctx.inbox_id, to=ctx.to, body=text, thread_id=ctx.thread_id,
+                    include_quote=None if self.settings.quote_replies else False,
                     attachments=attachments))
             else:
                 # No conversation on record: chat_id is a bare address (cron delivery, send_message tool).

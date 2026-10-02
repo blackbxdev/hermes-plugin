@@ -64,6 +64,15 @@ Hermes drops unknown senders silently; no pairing code goes out by email.
 
 Channel mode answers only mail a person could have sent. OpenMail classifies each message; `automated`, `marketing` and `bounce` reach the agent as a notification, `spam` and `malicious` not at all.
 
+## Reply behaviour
+
+Email is correspondence, not a live transcript. In channel mode the sender gets exactly two mails per message: an instant one-line ack, then the finished answer when the turn completes. Everything in between — the agent's working narration, `⏳ Working` progress bubbles — is swallowed: the gateway's streaming contract marks interim sends, and email has no edit-in-place, so each would otherwise become its own mail.
+
+- `OPENMAIL_ACK` (default `true`): send the instant ack. `false` silences it.
+- `OPENMAIL_ACK_TEXT` (default `On it. Full reply shortly.`): the ack body.
+- `OPENMAIL_SUPPRESS_INTERIM` (default `true`): interim sends never become mail. Set `false` to restore the old behaviour (every intermediate turn mailed separately; noisy).
+- `OPENMAIL_QUOTE_REPLIES` (default `false`): replies quote the previous message. Off by default so the agent never nests its own words back at the sender.
+
 Per-inbox override, pod scope only, in `~/.hermes/config.yaml`:
 
 ```yaml
