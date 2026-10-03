@@ -260,12 +260,12 @@ def test_slow_turn_ack_is_dynamic(tmp_path, monkeypatch):
 
     async def flow():
         await adapter._on_event(event())
-        assert (await adapter.send("ada@x.io", "Sweeping Kijiji for a 2020 Can-Am Outlander 850",
+        assert (await adapter.send("ada@x.io", "Pulling the latest inventory data",
                                    metadata={"_interim_send": True})).success
         await asyncio.sleep(0.2)  # delay elapses with no final: ack quotes the live status
 
     run(flow())
-    assert [s["body"] for s in api.sent] == ["On it - Sweeping Kijiji for a 2020 Can-Am Outlander 850"]
+    assert [s["body"] for s in api.sent] == ["On it - Pulling the latest inventory data"]
 
 
 def test_pending_ack_covers_followup_mail(tmp_path, monkeypatch):

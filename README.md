@@ -66,7 +66,7 @@ Channel mode answers only mail a person could have sent. OpenMail classifies eac
 
 ## Reply behaviour
 
-Email is correspondence, not a live transcript. Channel mode sends exactly one mail per inbound - the finished answer - plus, only when the answer takes longer than `OPENMAIL_ACK_DELAY` seconds (default 45), a one-line ack first. The rule is deterministic: a fast reply produces no ack at all (the answer is its own acknowledgment), a slow one confirms the mail landed while the agent works, and the pending ack is cancelled the moment the answer goes out. While the agent works, its latest status line folds into the ack body ("On it - Sweeping Kijiji..."), falling back to `OPENMAIL_ACK_TEXT` when no status exists yet.
+Email is correspondence, not a live transcript. Channel mode sends exactly one mail per inbound - the finished answer - plus, only when the answer takes longer than `OPENMAIL_ACK_DELAY` seconds (default 45), a one-line ack first. The rule is deterministic: a fast reply produces no ack at all (the answer is its own acknowledgment), a slow one confirms the mail landed while the agent works, and the pending ack is cancelled the moment the answer goes out. While the agent works, its latest status line folds into the ack body ("On it - Pulling the latest inventory data..."), falling back to `OPENMAIL_ACK_TEXT` when no status exists yet.
 
 Interim sends - the agent's working narration, `⏳ Working` progress bubbles - never become mail: the gateway's streaming contract marks them, and email has no edit-in-place.
 
